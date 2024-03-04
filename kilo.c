@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <errno.h>
 
@@ -17,29 +18,39 @@
 
 /*** data ***/
 
-struct termios orig_termios;
+struct editorConfig {
+  int screenrows;
+  int screencols;
+  struct termios orig_termios;
+};
+
+struct editorConfig E;
+
 
 /*** terminal ***/
 
 void die(const char *s) {
+  write(STDOUT_FILENO, "\x1b]2J", 4);
+  write(STDOUT_FILENO, "\x1b]H", 3);
+
   perror(s);
   exit(1);
 }
 
 void disableRawMode() {
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios)) {
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios)) {
     die("tcsetattr");
   }
 }
 
 void enableRawMode() {
-  if(tcgetattr(STDIN_FILENO, &orig_termios)) {
+  if(tcgetattr(STDIN_FILENO, &E.orig_termios)) {
     die("tcgetattr");
   }
 
   atexit(disableRawMode);
 
-  struct termios raw = orig_termios;
+  struct termios raw = E.orig_termios;
   //setting flags to disable various ctrl-<key> combos
   raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
   raw.c_oflag &= ~(OPOST);
@@ -55,8 +66,20 @@ void enableRawMode() {
 }
 /*** output ***/
 
+void editorDrawRows() {
+  int y;
+  for (y = 0; y < E.screenrows; y++) {
+    write(STDOUT_FILENO, "~\r\n", 3);
+  }
+}
+
 void editorRefreshScreen() {
   write(STDOUT_FILENO, "\x1b]2J", 4);
+  write(STDOUT_FILENO, "\x1b]H", 3);
+
+  editorDrawRows();
+
+  write(STDOUT_FILENO, "\x1b]H", 3);
 }
 
 /*** input ***/
@@ -72,11 +95,47 @@ char editorReadKey() {
   return c;
 }
 
+int getCursorPosition(int *rows, int *cols) {
+  if (write(STDIN_FILENO, "\x1b[6n", 1) != 4) {
+    return -1;
+  }
+
+  printf("\r\n");
+  char c;
+  while (read(STDIN_FILENO, &c, 1) == 1) {
+    if (iscntrl(c)) {
+      printf("%d\r\n", c);
+    } else {
+      printf("%d ('%c')\r\n", c, c);
+    }
+  }
+  editorReadKey();
+  return -1;
+
+}
+
+int getWindowSize(int *rows, int *cols) {
+  struct winsize ws;
+
+  if (1 || ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b{999C\x1b[999B", 12) != 12) {
+      return -1;
+    }
+    return getCursorPosition(rows, cols);
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
+
 void editorProcessKeypress() {
   char c = editorReadKey();
 
   switch(c) {
     case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b]2J", 4);
+      write(STDOUT_FILENO, "\x1b]H", 3);
       exit(0);
       break;
   }
@@ -84,8 +143,15 @@ void editorProcessKeypress() {
 
 /*** init ***/
 
+void initEditor() {
+  if (getWindowSize(&E.screenrows, &E.screencols)) {
+    die("getWindowSize");
+  }
+}
+
 int main() {
   enableRawMode();
+  initEditor();
 
   while (1) {
     editorRefreshScreen();
